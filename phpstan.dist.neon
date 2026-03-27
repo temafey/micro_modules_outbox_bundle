@@ -1,0 +1,12 @@
+parameters:
+    level: 6
+    paths:
+        - src
+    excludePaths:
+    ignoreErrors:
+        # Broadway types may not be available
+        - '#Class Broadway\\#'
+        # Enqueue types may not be available
+        - '#Class Enqueue\\#'
+        # OpenTelemetry types may not be available
+        - '#Class OpenTelemetry\\#'
