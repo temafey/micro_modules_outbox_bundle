@@ -14,5 +14,5 @@ use OpenTelemetry\API\Metrics\MeterInterface;
  */
 interface MeterFactoryInterface
 {
-    public function create(string $name, ?string $version = null): MeterInterface;
+    public function getMeter(): MeterInterface;
 }

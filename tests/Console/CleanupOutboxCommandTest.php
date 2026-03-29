@@ -1,0 +1,137 @@
+<?php
+
+declare(strict_types=1);
+
+namespace MicroModule\Outbox\Tests\Console;
+
+use MicroModule\Outbox\Console\CleanupOutboxCommand;
+use MicroModule\Outbox\Domain\OutboxRepositoryInterface;
+use MicroModule\Outbox\Infrastructure\Metrics\NullOutboxMetrics;
+use PHPUnit\Framework\Attributes\CoversClass;
+use PHPUnit\Framework\Attributes\Test;
+use PHPUnit\Framework\TestCase;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Tester\CommandTester;
+
+#[CoversClass(CleanupOutboxCommand::class)]
+final class CleanupOutboxCommandTest extends TestCase
+{
+    #[Test]
+    public function dryRunShowsCountWithoutDeleting(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::once())
+            ->method('countPublishedBefore')
+            ->willReturn(42);
+        $repository->expects(self::never())
+            ->method('deletePublishedBefore');
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute(['--dry-run' => true]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('42', $tester->getDisplay());
+    }
+
+    #[Test]
+    public function dryRunWithIncludeFailedShowsBothCounts(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::once())
+            ->method('countPublishedBefore')
+            ->willReturn(10);
+        $repository->expects(self::once())
+            ->method('countFailedExceedingRetries')
+            ->with(5)
+            ->willReturn(3);
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute(['--dry-run' => true, '--include-failed' => true]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('13', $tester->getDisplay());
+    }
+
+    #[Test]
+    public function executionDeletesInBatches(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::exactly(2))
+            ->method('deletePublishedBefore')
+            ->willReturnOnConsecutiveCalls(1000, 500);
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute(['--retention' => '7', '--batch-size' => '1000']);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('1500', $tester->getDisplay());
+    }
+
+    #[Test]
+    public function executionWithIncludeFailedDeletesBoth(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::once())
+            ->method('deletePublishedBefore')
+            ->willReturn(100);
+        $repository->expects(self::once())
+            ->method('deleteFailedExceedingRetries')
+            ->willReturn(5);
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute(['--include-failed' => true]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+    }
+
+    #[Test]
+    public function executionFailsOnException(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::once())
+            ->method('deletePublishedBefore')
+            ->willThrowException(new \RuntimeException('DB connection lost'));
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        self::assertStringContainsString('DB connection lost', $tester->getDisplay());
+    }
+
+    #[Test]
+    public function commandHasCorrectName(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+
+        self::assertSame('app:outbox:cleanup', $command->getName());
+    }
+
+    #[Test]
+    public function customRetentionDaysOption(): void
+    {
+        $repository = $this->createMock(OutboxRepositoryInterface::class);
+        $repository->expects(self::once())
+            ->method('countPublishedBefore')
+            ->willReturn(0);
+
+        $command = new CleanupOutboxCommand($repository, new NullOutboxMetrics());
+        $tester = new CommandTester($command);
+
+        $tester->execute(['--dry-run' => true, '--retention' => '30']);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        self::assertStringContainsString('30 days', $tester->getDisplay());
+    }
+}

@@ -14,5 +14,5 @@ use OpenTelemetry\API\Trace\TracerInterface;
  */
 interface TracerFactoryInterface
 {
-    public function create(string $name, ?string $version = null): TracerInterface;
+    public function getTracer(): TracerInterface;
 }
