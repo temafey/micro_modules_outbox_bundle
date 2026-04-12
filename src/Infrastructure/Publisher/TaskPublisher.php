@@ -4,106 +4,67 @@ declare(strict_types=1);
 
 namespace MicroModule\Outbox\Infrastructure\Publisher;
 
-use Enqueue\Client\ProducerInterface;
+use Broadway\CommandHandling\CommandBus;
+use MicroModule\Outbox\Application\Task\CommandFactory;
 use MicroModule\Outbox\Domain\OutboxEntryInterface;
 use MicroModule\Outbox\Domain\OutboxMessageType;
-use MicroModule\Task\Application\Processor\JobCommandBusProcessor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
 
 /**
  * Publisher for task commands stored in the outbox.
  *
- * Sends task commands through the Enqueue ProducerInterface using
- * the same message format as direct TaskRepository.produce() calls.
+ * Reads a TASK outbox entry, deserializes the command payload via
+ * CommandFactory (Broadway Serializable::deserialize() format), then
+ * dispatches the resulting command object through the CommandBus.
  *
- * Message format:
- * {
- *   "type": "news.create.command",
- *   "args": [processUuid, ...command args]
- * }
+ * JSON / deserialization errors are caught and re-thrown as
+ * OutboxPublishException::deserializationFailed so that the outbox
+ * poller can record the failure and apply retry / dead-letter logic
+ * without crashing the publish loop.
  *
- * IMPORTANT: This publisher uses the inner ProducerInterface directly,
- * NOT the OutboxAwareTaskProducer decorator, to avoid infinite loops.
- * The service configuration must inject 'enqueue.client.task.producer.inner'
- * or disable outbox mode when publishing.
- *
+ * @see \MicroModule\Outbox\Application\Task\CommandFactory
  * @see ADR-006: Transactional Outbox Pattern
- * @see TASK-14.3: TaskRepository Decorator
- * @see TASK-14.4: Background Publisher
+ * @see TASK-01-10: VP-7b — CommandFactory for TaskPublisher
  */
-final readonly class TaskPublisher implements OutboxPublisherInterface
+final class TaskPublisher implements OutboxPublisherInterface
 {
-    private const string KEY_MESSAGE_TYPE = 'type';
-
-    private const string KEY_MESSAGE_ARGS = 'args';
-
     public function __construct(
-        private ProducerInterface $taskProducer,
-        private LoggerInterface $logger = new NullLogger(),
+        private readonly CommandBus $commandBus,
+        private readonly CommandFactory $commandFactory,
+        private readonly LoggerInterface $logger = new NullLogger(),
     ) {
     }
 
     public function publish(OutboxEntryInterface $entry): void
     {
+        $commandClass = $entry->getEventType();
         $payloadJson = $entry->getEventPayload();
 
         try {
             /** @var array<string, mixed> $payload */
             $payload = json_decode($payloadJson, true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $jsonException) {
-            throw OutboxPublishException::invalidTaskFormat(
-                $entry->getId(),
-                'Invalid JSON payload: ' . $jsonException->getMessage(),
-            );
+        } catch (\JsonException $e) {
+            throw OutboxPublishException::deserializationFailed($commandClass, $e->getMessage());
         }
 
-        // Validate payload structure
-        if (! isset($payload[self::KEY_MESSAGE_TYPE])) {
-            throw OutboxPublishException::invalidTaskFormat(
-                $entry->getId(),
-                sprintf('Missing required key: %s', self::KEY_MESSAGE_TYPE),
-            );
+        try {
+            $command = $this->commandFactory->deserialize($commandClass, $payload);
+        } catch (\Throwable $e) {
+            throw OutboxPublishException::deserializationFailed($commandClass, $e->getMessage());
         }
 
-        if (! isset($payload[self::KEY_MESSAGE_ARGS]) || ! is_array($payload[self::KEY_MESSAGE_ARGS])) {
-            throw OutboxPublishException::invalidTaskFormat(
-                $entry->getId(),
-                sprintf('Missing or invalid key: %s (expected array)', self::KEY_MESSAGE_ARGS),
-            );
-        }
+        $this->commandBus->dispatch($command);
 
-        // Determine routing - use JobCommandBusProcessor route
-        $route = $this->determineRoute();
-
-        // Send to task queue using same route as direct produce()
-        $this->taskProducer->sendCommand($route, $payload);
-
-        $this->logger->debug('Task published from outbox', [
+        $this->logger->debug('Task command published from outbox', [
             'message_id' => $entry->getId(),
-            'command_type' => $payload[self::KEY_MESSAGE_TYPE],
+            'command_class' => $commandClass,
             'routing_key' => $entry->getRoutingKey(),
-            'route' => $route,
         ]);
     }
 
     public function supports(string $messageType): bool
     {
         return $messageType === OutboxMessageType::TASK->value;
-    }
-
-    /**
-     * Determine the routing key for task commands.
-     *
-     * Uses JobCommandBusProcessor::getRoute() for consistent routing.
-     */
-    private function determineRoute(): string
-    {
-        if (class_exists(JobCommandBusProcessor::class)) {
-            return JobCommandBusProcessor::getRoute();
-        }
-
-        // Fallback routing key
-        return 'job_command_bus';
     }
 }

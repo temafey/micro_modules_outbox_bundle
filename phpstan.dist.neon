@@ -4,9 +4,17 @@ parameters:
         - src
     excludePaths:
     ignoreErrors:
-        # Broadway types may not be available
-        - '#Class Broadway\\#'
-        # Enqueue types may not be available
-        - '#Class Enqueue\\#'
-        # OpenTelemetry types may not be available
-        - '#Class OpenTelemetry\\#'
+        # micro-module/event-queue types may not be available (optional dependency)
+        - '#MicroModule\\EventQueue\\#'
+        # Pre-existing: missing iterable value type annotations in domain/infra files
+        - message: '#no value type specified in iterable type array#'
+          path: src/Domain/OutboxEntryInterface.php
+        - message: '#no value type specified in iterable type array#'
+          path: src/Infrastructure/OutboxEntry.php
+        - message: '#no value type specified in iterable type array#'
+          path: src/Infrastructure/OutboxAwareTaskProducer.php
+        # Pre-existing: null-coalesce on non-null offsets (defensive code in serializers)
+        - message: '#Offset 0 on non-empty-list.* on left side of \?\? always exists#'
+          path: src/Infrastructure/BroadwayDomainEventSerializer.php
+        - message: '#Offset 0 on non-empty-list.* on left side of \?\? always exists#'
+          path: src/Infrastructure/OutboxAwareEventStore.php

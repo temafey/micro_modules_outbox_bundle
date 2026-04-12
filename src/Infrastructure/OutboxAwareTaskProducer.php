@@ -8,6 +8,7 @@ use Enqueue\Client\Message;
 use Enqueue\Client\ProducerInterface;
 use Enqueue\Rpc\Promise;
 use MicroModule\Outbox\Domain\OutboxRepositoryInterface;
+use MicroModule\Saga\Application\SagaCommandQueueInterface;
 use MicroModule\Task\Application\Processor\JobCommandBusProcessor;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -30,7 +31,7 @@ use Ramsey\Uuid\Uuid;
  * @see docs/tasks/phase-14-transactional-outbox/TASK-14.3-taskrepository-decorator.md
  * @see OutboxPublisherCommand for the async publishing worker
  */
-final class OutboxAwareTaskProducer implements OutboxAwareProducerInterface
+final class OutboxAwareTaskProducer implements OutboxAwareProducerInterface, SagaCommandQueueInterface
 {
     public function __construct(
         private readonly ProducerInterface $inner,
@@ -79,10 +80,52 @@ final class OutboxAwareTaskProducer implements OutboxAwareProducerInterface
     /**
      * {@inheritDoc}
      *
+     * Implements SagaCommandQueueInterface::enqueue() by writing a TASK outbox entry.
+     *
+     * Accepts a fully-qualified command class name and its Broadway-serializable
+     * payload array. The payload is JSON-encoded and stored atomically in the
+     * outbox table within the current database transaction.
+     *
+     * The routing key is determined from JobCommandBusProcessor::getRoute() so
+     * the TaskPublisher can dispatch the command to the correct queue.
+     *
+     * @param class-string         $commandClass Fully-qualified command class name
+     * @param array<string, mixed> $payload      Broadway Serializable::serialize() format
+     */
+    public function enqueue(string $commandClass, array $payload): void
+    {
+        $payloadJson = json_encode($payload, JSON_THROW_ON_ERROR);
+
+        $aggregateType = $this->extractAggregateType($commandClass);
+        $aggregateId = $this->extractAggregateId($payload);
+        $routingKey = $this->determineRoutingKey();
+
+        $entry = OutboxEntry::createForTask(
+            aggregateType: $aggregateType,
+            aggregateId: $aggregateId,
+            commandType: $commandClass,
+            commandPayload: $payloadJson,
+            topic: $routingKey,
+            routingKey: $routingKey,
+        );
+
+        $this->outboxRepository->save($entry);
+
+        $this->logger->debug('Saga command enqueued to outbox', [
+            'command_class' => $commandClass,
+            'aggregate_type' => $aggregateType,
+            'aggregate_id' => $aggregateId,
+            'entry_id' => $entry->getId(),
+        ]);
+    }
+
+    /**
+     * {@inheritDoc}
+     *
      * Event sending passes through to inner producer.
      * Domain events use OutboxAwareEventStore, not this producer.
      */
-    public function sendEvent(string $topic, $message): void
+    public function sendEvent(string $topic, mixed $message): void
     {
         // Events are handled by OutboxAwareEventStore, not here
         $this->inner->sendEvent($topic, $message);
@@ -160,10 +203,14 @@ final class OutboxAwareTaskProducer implements OutboxAwareProducerInterface
     {
         if ($message instanceof Message) {
             $body = $message->getBody();
+            // Message::getBody() returns string|null — JSON-decode if possible
+            if (is_string($body)) {
+                $decoded = json_decode($body, true);
 
-            return is_array($body) ? $body : [
-                'data' => $body,
-            ];
+                return is_array($decoded) ? $decoded : ['data' => $body];
+            }
+
+            return ['data' => $body];
         }
 
         if (is_array($message)) {

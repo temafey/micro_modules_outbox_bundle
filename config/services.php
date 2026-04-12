@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use MicroModule\Outbox\Application\Task\CommandFactory;
 use MicroModule\Outbox\Console\CleanupOutboxCommand;
 use MicroModule\Outbox\Console\PublishOutboxCommand;
 use MicroModule\Outbox\Domain\OutboxRepositoryInterface;
@@ -43,6 +44,12 @@ return static function (ContainerConfigurator $container): void {
     $services->set(NullOutboxMetrics::class);
 
     $services->alias(OutboxMetricsInterface::class, NullOutboxMetrics::class);
+
+    // --- Command Factory (for TaskPublisher deserialization) ---
+    // Projects populate $classMap via DI config (see TASK-07-01).
+    $services->set(CommandFactory::class)
+        ->args(['$classMap' => []])
+        ->public();
 
     // --- Publishers ---
     $services->set(EventPublisher::class);
