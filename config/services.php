@@ -54,7 +54,14 @@ return static function (ContainerConfigurator $container): void {
     // --- Publishers ---
     $services->set(EventPublisher::class);
 
-    $services->set(TaskPublisher::class);
+    // TaskPublisher requires Broadway\CommandHandling\CommandBus.
+    // Broadway registers this as 'broadway.command_handling.simple_command_bus'
+    // (an event-dispatching wrapper). We wire it explicitly by service ID so
+    // that autowiring against the interface is not required.
+    $services->set(TaskPublisher::class)
+        ->args([
+            '$commandBus' => service('broadway.command_handling.simple_command_bus'),
+        ]);
 
     $services->set(OutboxPublisher::class)
         ->args([
