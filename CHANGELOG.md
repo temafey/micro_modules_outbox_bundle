@@ -4,9 +4,23 @@ All notable changes to `micro-module/outbox-bundle` are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [0.3.0] — 2026-04-22
 
 ### Added
+
+- **OBX2-FF**: Optional `?OutboxFeatureFlag $featureFlag = null` constructor parameter on
+  `OutboxAwareEventStore` (`src/Infrastructure/OutboxAwareEventStore.php`). When provided, the
+  decorator's initial `$enabled` state is derived from `$featureFlag->isEnabled()`. When omitted,
+  the decorator defaults to enabled — preserving existing default behaviour for all 0.1.x / 0.2.x
+  callers. Runtime `enable()` / `disable()` / `isEnabled()` methods continue to override the
+  flag-derived initial state.
+  `config/broadway.php` now wires the `OutboxFeatureFlag` service (already registered via
+  `config/services.php:39-40` as `OutboxFeatureFlag::fromEnv()`) into the decorator's args.
+  Downstream projects inherit the `OUTBOX_ENABLED` environment variable as a runtime kill-switch
+  with no additional wiring.
+  Unit tests added: `tests/Infrastructure/OutboxAwareEventStoreTest.php` (4 scenarios: flag-enabled
+  writes outbox row, flag-disabled skips outbox, default-no-flag is enabled, runtime disable()
+  overrides initial flag state).
 
 - **VP-7b**: Introduced `CommandFactory` (`src/Application/Task/CommandFactory.php`) for deserializing
   Broadway `Serializable` command objects from outbox TASK payloads.  Mirrors the `EventPublisher`

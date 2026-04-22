@@ -5,6 +5,7 @@ declare(strict_types=1);
 use MicroModule\Outbox\Domain\DomainEventSerializerInterface;
 use MicroModule\Outbox\Infrastructure\BroadwayDomainEventSerializer;
 use MicroModule\Outbox\Infrastructure\OutboxAwareEventStore;
+use MicroModule\Outbox\Infrastructure\OutboxFeatureFlag;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 
 use function Symfony\Component\DependencyInjection\Loader\Configurator\service;
@@ -29,5 +30,6 @@ return static function (ContainerConfigurator $container): void {
         ->decorate('broadway.event_store', priority: -10)
         ->args([
             '$inner' => service('.inner'),
+            '$featureFlag' => service(OutboxFeatureFlag::class),
         ]);
 };

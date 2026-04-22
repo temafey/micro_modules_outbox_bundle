@@ -33,7 +33,7 @@ use Psr\Log\NullLogger;
  */
 final class OutboxAwareEventStore implements EventStore
 {
-    private bool $enabled = true;
+    private bool $enabled;
 
     public function __construct(
         private readonly EventStore $inner,
@@ -41,7 +41,10 @@ final class OutboxAwareEventStore implements EventStore
         private readonly DomainEventSerializerInterface $serializer,
         private readonly OutboxMetricsInterface $metrics,
         private readonly LoggerInterface $logger = new NullLogger(),
+        ?OutboxFeatureFlag $featureFlag = null,
     ) {
+        // Default to enabled if no flag injected — preserves existing default behaviour.
+        $this->enabled = $featureFlag?->isEnabled() ?? true;
     }
 
     /**
