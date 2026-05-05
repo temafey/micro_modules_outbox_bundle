@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use MicroModule\Outbox\Application\Task\CommandFactory;
 use MicroModule\Outbox\Console\CleanupOutboxCommand;
+use MicroModule\Outbox\Console\DlqOutboxCommand;
 use MicroModule\Outbox\Console\PublishOutboxCommand;
 use MicroModule\Outbox\Domain\OutboxRepositoryInterface;
 use MicroModule\Outbox\Infrastructure\DbalOutboxRepository;
@@ -82,5 +83,8 @@ return static function (ContainerConfigurator $container): void {
         ->tag('console.command');
 
     $services->set(CleanupOutboxCommand::class)
+        ->tag('console.command');
+
+    $services->set(DlqOutboxCommand::class)
         ->tag('console.command');
 };

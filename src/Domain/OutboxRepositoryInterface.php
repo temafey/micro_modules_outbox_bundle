@@ -101,23 +101,80 @@ interface OutboxRepositoryInterface
     public function deletePublishedBefore(\DateTimeImmutable $before, int $limit): int;
 
     /**
-     * Count failed entries exceeding the maximum retry count.
+     * Count failed entries that have reached or exceeded the maximum retry count.
      *
      * Used for dry-run cleanup preview of dead-letter messages.
+     * Matches rows with retry_count >= $maxRetries — a row whose retry_count has
+     * reached the configured budget is treated as a dead-letter and excluded
+     * from polling by the publisher.
      */
     public function countFailedExceedingRetries(int $maxRetries): int;
 
     /**
-     * Delete failed entries exceeding the maximum retry count in batches.
+     * Delete failed entries that have reached or exceeded the maximum retry count, in batches.
      *
      * Removes dead-letter messages that will never be successfully published.
+     * Matches rows with retry_count >= $maxRetries.
      *
-     * @param int $maxRetries Maximum retries threshold
+     * @param int $maxRetries Maximum retries threshold (inclusive — retry_count >= threshold)
      * @param int $limit      Maximum entries to delete per batch
      *
      * @return int Number of entries deleted
      */
     public function deleteFailedExceedingRetries(int $maxRetries, int $limit): int;
+
+    /**
+     * Mark an entry as dead-letter at the given timestamp.
+     *
+     * Sets dead_letter_at on the row. The row stays in the table but is
+     * excluded from findUnpublished() / findUnpublishedByType() until
+     * replayDeadLetter() resets it.
+     *
+     * Idempotent: re-marking an already-DLQ entry overwrites dead_letter_at.
+     */
+    public function markAsDeadLetter(string $id, \DateTimeImmutable $deadLetterAt): void;
+
+    /**
+     * Find DLQ entries (dead_letter_at IS NOT NULL).
+     *
+     * Returns entries ordered by dead_letter_at ASC (oldest first).
+     *
+     * @param int $limit Maximum entries to return
+     *
+     * @return OutboxEntryInterface[]
+     */
+    public function findDeadLetter(int $limit): array;
+
+    /**
+     * Count all DLQ entries.
+     */
+    public function countDeadLetter(): int;
+
+    /**
+     * Replay a DLQ entry — clear dead_letter_at, reset retry_count to 0.
+     *
+     * After replay, the row is picked up by findUnpublished() on the next
+     * publisher poll.
+     *
+     * @return bool true if a row was updated; false if id is unknown or not DLQ
+     */
+    public function replayDeadLetter(string $id): bool;
+
+    /**
+     * Count DLQ entries with dead_letter_at older than the given timestamp.
+     *
+     * Used for dry-run preview of DLQ retention cleanup.
+     */
+    public function countDeadLetterBefore(\DateTimeImmutable $before): int;
+
+    /**
+     * Delete DLQ entries with dead_letter_at older than the given timestamp, in batches.
+     *
+     * @param int $limit Maximum entries to delete per batch
+     *
+     * @return int Number of entries deleted
+     */
+    public function deleteDeadLetterBefore(\DateTimeImmutable $before, int $limit): int;
 
     /**
      * Get an entry by ID.
@@ -132,6 +189,7 @@ interface OutboxRepositoryInterface
      *     total_events: int,
      *     total_tasks: int,
      *     failed_count: int,
+     *     dlq_count: int,
      *     oldest_pending_seconds: int|null
      * }
      */

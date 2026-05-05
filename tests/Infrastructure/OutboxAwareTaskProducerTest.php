@@ -95,6 +95,35 @@ final class OutboxAwareTaskProducerTest extends TestCase
                 return 0;
             }
 
+            public function markAsDeadLetter(string $id, \DateTimeImmutable $deadLetterAt): void
+            {
+            }
+
+            public function findDeadLetter(int $limit): array
+            {
+                return [];
+            }
+
+            public function countDeadLetter(): int
+            {
+                return 0;
+            }
+
+            public function replayDeadLetter(string $id): bool
+            {
+                return false;
+            }
+
+            public function countDeadLetterBefore(\DateTimeImmutable $before): int
+            {
+                return 0;
+            }
+
+            public function deleteDeadLetterBefore(\DateTimeImmutable $before, int $limit): int
+            {
+                return 0;
+            }
+
             public function findById(string $id): ?OutboxEntryInterface
             {
                 return null;
@@ -107,6 +136,7 @@ final class OutboxAwareTaskProducerTest extends TestCase
                     'total_events' => 0,
                     'total_tasks' => 0,
                     'failed_count' => 0,
+                    'dlq_count' => 0,
                     'oldest_pending_seconds' => null,
                 ];
             }

@@ -46,6 +46,10 @@ final class CleanupOutboxCommand extends Command
 
     private const int DEFAULT_BATCH_SIZE = 1000;
 
+    private const int DEFAULT_MAX_RETRIES = 5;
+
+    private const int DEFAULT_DEAD_LETTER_RETENTION_DAYS = 90;
+
     public function __construct(
         private readonly OutboxRepositoryInterface $outboxRepository,
         private readonly OutboxMetricsInterface $metrics,
@@ -77,6 +81,20 @@ final class CleanupOutboxCommand extends Command
                 null,
                 InputOption::VALUE_NONE,
                 'Include failed messages that exceeded max retries'
+            )
+            ->addOption(
+                'max-retries',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Retry threshold for --include-failed (must match publisher --max-retries)',
+                self::DEFAULT_MAX_RETRIES
+            )
+            ->addOption(
+                'dead-letter-retention',
+                null,
+                InputOption::VALUE_REQUIRED,
+                'Retention period in days for DLQ rows (dead_letter_at older than cutoff is purged); '
+                . 'when omitted, DLQ rows are kept indefinitely',
             );
     }
 
@@ -88,18 +106,28 @@ final class CleanupOutboxCommand extends Command
         $batchSize = (int) $input->getOption('batch-size');
         $dryRun = (bool) $input->getOption('dry-run');
         $includeFailed = (bool) $input->getOption('include-failed');
+        $maxRetries = (int) $input->getOption('max-retries');
+        $dlqRetentionRaw = $input->getOption('dead-letter-retention');
+        $dlqRetentionDays = is_numeric($dlqRetentionRaw) ? (int) $dlqRetentionRaw : null;
 
         // Calculate cutoff date
         $cutoffDate = new \DateTimeImmutable(sprintf('-%d days', $retentionDays));
+        $dlqCutoffDate = $dlqRetentionDays !== null
+            ? new \DateTimeImmutable(sprintf('-%d days', $dlqRetentionDays))
+            : null;
 
         $io->title('Outbox Cleanup');
-        $io->info([
+        $io->info(array_filter([
             sprintf('Retention period: %d days', $retentionDays),
             sprintf('Cutoff date: %s', $cutoffDate->format('Y-m-d H:i:s')),
             sprintf('Batch size: %d', $batchSize),
             sprintf('Include failed: %s', $includeFailed ? 'yes' : 'no'),
-            $dryRun ? 'DRY RUN MODE - No records will be deleted' : '',
-        ]);
+            $includeFailed ? sprintf('Max retries threshold: %d', $maxRetries) : null,
+            $dlqCutoffDate !== null
+                ? sprintf('DLQ retention: %d days (cutoff %s)', $dlqRetentionDays, $dlqCutoffDate->format('Y-m-d H:i:s'))
+                : null,
+            $dryRun ? 'DRY RUN MODE - No records will be deleted' : null,
+        ]));
 
         $startTime = microtime(true);
         $totalDeleted = 0;
@@ -110,9 +138,15 @@ final class CleanupOutboxCommand extends Command
                 $countToDelete = $this->outboxRepository->countPublishedBefore($cutoffDate);
 
                 if ($includeFailed) {
-                    $failedCount = $this->outboxRepository->countFailedExceedingRetries(5);
+                    $failedCount = $this->outboxRepository->countFailedExceedingRetries($maxRetries);
                     $countToDelete += $failedCount;
                     $io->text(sprintf('Failed messages exceeding retries: %d', $failedCount));
+                }
+
+                if ($dlqCutoffDate !== null) {
+                    $dlqCount = $this->outboxRepository->countDeadLetterBefore($dlqCutoffDate);
+                    $countToDelete += $dlqCount;
+                    $io->text(sprintf('DLQ rows older than retention: %d', $dlqCount));
                 }
 
                 $io->success(sprintf('[DRY-RUN] Would delete %d records', $countToDelete));
@@ -141,7 +175,7 @@ final class CleanupOutboxCommand extends Command
                 $failedDeleted = 0;
                 do {
                     $deletedThisBatch = $this->outboxRepository->deleteFailedExceedingRetries(
-                        5, // max retries
+                        $maxRetries,
                         $batchSize
                     );
 
@@ -160,6 +194,32 @@ final class CleanupOutboxCommand extends Command
                 $io->text(sprintf('Failed messages deleted: %d', $failedDeleted));
             }
 
+            // Clean up DLQ rows older than retention if requested
+            if ($dlqCutoffDate !== null) {
+                $io->section('Deleting DLQ rows older than retention...');
+
+                $dlqDeleted = 0;
+                do {
+                    $deletedThisBatch = $this->outboxRepository->deleteDeadLetterBefore(
+                        $dlqCutoffDate,
+                        $batchSize
+                    );
+
+                    $dlqDeleted += $deletedThisBatch;
+                    $totalDeleted += $deletedThisBatch;
+
+                    if ($deletedThisBatch > 0 && $output->isVerbose()) {
+                        $io->text(sprintf(
+                            '  Deleted batch of %d DLQ (total: %d)',
+                            $deletedThisBatch,
+                            $dlqDeleted
+                        ));
+                    }
+                } while ($deletedThisBatch === $batchSize);
+
+                $io->text(sprintf('DLQ rows deleted: %d', $dlqDeleted));
+            }
+
             $durationSeconds = microtime(true) - $startTime;
 
             // Record metrics
@@ -172,6 +232,8 @@ final class CleanupOutboxCommand extends Command
                 'cutoff_date' => $cutoffDate->format('Y-m-d H:i:s'),
                 'duration_seconds' => round($durationSeconds, 3),
                 'included_failed' => $includeFailed,
+                'max_retries' => $includeFailed ? $maxRetries : null,
+                'dlq_retention_days' => $dlqRetentionDays,
             ]);
 
             $io->success([

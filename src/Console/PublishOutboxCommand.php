@@ -223,26 +223,49 @@ final class PublishOutboxCommand extends Command
                             'retry_count' => $message->getRetryCount(),
                         ]);
 
-                        // Record failure with exponential backoff
-                        if ($message->getRetryCount() < $maxRetries) {
-                            $this->outboxRepository->markAsFailed(
+                        // Always persist the failure: increment retry_count, schedule next_retry_at
+                        // and store last_error. Required even when the row will cross the retry
+                        // budget on this attempt, so retry_count and last_error reflect the most
+                        // recent failure for postmortem.
+                        $this->outboxRepository->markAsFailed(
+                            $message->getId(),
+                            $e->getMessage(),
+                            $this->calculateNextRetryAt($message->getRetryCount())
+                        );
+
+                        $newRetryCount = $message->getRetryCount() + 1;
+
+                        // Record retry attempt metrics
+                        $this->metrics->recordRetryAttempt($message->getMessageType(), $newRetryCount);
+
+                        // Crossing the retry budget — stamp dead_letter_at so the row is excluded
+                        // from polling via SQL filter (defence in depth: fetchPendingMessages also
+                        // filters by retry_count). Operator can replay via app:outbox:dlq.
+                        if ($newRetryCount >= $maxRetries) {
+                            $this->outboxRepository->markAsDeadLetter(
                                 $message->getId(),
-                                $e->getMessage(),
-                                $this->calculateNextRetryAt($message->getRetryCount())
+                                new \DateTimeImmutable()
                             );
 
-                            // Record retry attempt metrics
-                            $this->metrics->recordRetryAttempt(
-                                $message->getMessageType(),
-                                $message->getRetryCount() + 1,
-                            );
+                            $this->logger->critical('Outbox message exceeded max retries, marked as dead-letter', [
+                                'message_id' => $message->getId(),
+                                'message_type' => $message->getMessageType()
+                                    ->value,
+                                'event_type' => $message->getEventType(),
+                                'aggregate_type' => $message->getAggregateType(),
+                                'aggregate_id' => $message->getAggregateId(),
+                                'retry_count' => $newRetryCount,
+                                'max_retries' => $maxRetries,
+                                'last_error' => $e->getMessage(),
+                                'error_type' => $errorType,
+                            ]);
                         }
 
                         $io->error(sprintf(
                             '  ✗ Failed: %s - %s (retry %d/%d)',
                             $message->getEventType(),
                             $e->getMessage(),
-                            $message->getRetryCount() + 1,
+                            $newRetryCount,
                             $maxRetries
                         ));
                     }
@@ -295,10 +318,12 @@ final class PublishOutboxCommand extends Command
             $messages = $this->outboxRepository->findUnpublishedByType($messageType, $limit);
         }
 
-        // Filter out messages exceeding max retries
+        // Strict less-than: a row whose retry_count has already reached the budget is treated
+        // as a dead-letter and skipped. The cleanup command (--include-failed) is responsible
+        // for purging or operator-driven replay.
         return array_filter(
             $messages,
-            static fn (OutboxEntryInterface $m): bool => $m->getRetryCount() <= $maxRetries
+            static fn (OutboxEntryInterface $m): bool => $m->getRetryCount() < $maxRetries
         );
     }
 

@@ -250,4 +250,133 @@ final class OutboxEntryTest extends TestCase
         self::assertSame(300, OutboxEntry::calculateNextRetryDelay(10));
         self::assertSame(300, OutboxEntry::calculateNextRetryDelay(20));
     }
+
+    #[Test]
+    public function newEntryIsNotDeadLetter(): void
+    {
+        $entry = OutboxEntry::createForEvent(
+            aggregateType: 'News',
+            aggregateId: 'agg-1',
+            eventType: 'E',
+            eventPayload: '{}',
+            topic: 't',
+            routingKey: 'r',
+        );
+
+        self::assertNull($entry->getDeadLetterAt());
+        self::assertFalse($entry->isDeadLetter());
+    }
+
+    #[Test]
+    public function markAsDeadLetterStampsTimestampAndPreservesOtherFields(): void
+    {
+        $entry = OutboxEntry::createForEvent(
+            aggregateType: 'News',
+            aggregateId: 'agg-1',
+            eventType: 'E',
+            eventPayload: '{}',
+            topic: 't',
+            routingKey: 'r',
+        );
+        $stamp = new \DateTimeImmutable('2026-05-05 12:00:00');
+
+        $dlq = $entry->markAsDeadLetter($stamp);
+
+        self::assertTrue($dlq->isDeadLetter());
+        self::assertSame($stamp, $dlq->getDeadLetterAt());
+        self::assertSame($entry->getId(), $dlq->getId());
+        self::assertSame($entry->getRetryCount(), $dlq->getRetryCount());
+        // Original is unchanged (immutability)
+        self::assertFalse($entry->isDeadLetter());
+    }
+
+    #[Test]
+    public function deadLetterEntryIsNotEligibleForRetry(): void
+    {
+        $entry = OutboxEntry::createForEvent(
+            aggregateType: 'News',
+            aggregateId: 'agg-1',
+            eventType: 'E',
+            eventPayload: '{}',
+            topic: 't',
+            routingKey: 'r',
+        );
+
+        $dlq = $entry->markAsDeadLetter(new \DateTimeImmutable());
+
+        self::assertFalse($dlq->isEligibleForRetry());
+    }
+
+    #[Test]
+    public function replayFromDeadLetterClearsDlqAndResetsRetryCount(): void
+    {
+        $entry = OutboxEntry::createForEvent(
+            aggregateType: 'News',
+            aggregateId: 'agg-1',
+            eventType: 'E',
+            eventPayload: '{}',
+            topic: 't',
+            routingKey: 'r',
+        );
+
+        $failed = $entry;
+        for ($i = 0; $i < 5; $i++) {
+            $failed = $failed->markAsFailed('boom', new \DateTimeImmutable('+1 hour'));
+        }
+        $dlq = $failed->markAsDeadLetter(new \DateTimeImmutable());
+
+        $replayed = $dlq->replayFromDeadLetter();
+
+        self::assertFalse($replayed->isDeadLetter());
+        self::assertNull($replayed->getDeadLetterAt());
+        self::assertSame(0, $replayed->getRetryCount());
+        self::assertNull($replayed->getLastError());
+        self::assertNull($replayed->getNextRetryAt());
+        self::assertTrue($replayed->isEligibleForRetry());
+    }
+
+    #[Test]
+    public function toArrayAndFromArrayRoundTripDeadLetterAt(): void
+    {
+        $stamp = new \DateTimeImmutable('2026-05-05 12:34:56');
+        $entry = OutboxEntry::createForEvent(
+            aggregateType: 'News',
+            aggregateId: 'agg-1',
+            eventType: 'E',
+            eventPayload: '{}',
+            topic: 't',
+            routingKey: 'r',
+        )->markAsDeadLetter($stamp);
+
+        $rehydrated = OutboxEntry::fromArray($entry->toArray());
+
+        self::assertTrue($rehydrated->isDeadLetter());
+        self::assertEquals($stamp, $rehydrated->getDeadLetterAt());
+    }
+
+    #[Test]
+    public function fromArrayHandlesMissingDeadLetterAtForBackwardsCompat(): void
+    {
+        // Rows from before the migration won't have dead_letter_at in the array
+        $entry = OutboxEntry::fromArray([
+            'id' => '11111111-1111-1111-1111-111111111111',
+            'message_type' => 'EVENT',
+            'aggregate_type' => 'News',
+            'aggregate_id' => 'agg-1',
+            'event_type' => 'E',
+            'event_payload' => '{}',
+            'topic' => 't',
+            'routing_key' => 'r',
+            'created_at' => '2026-05-05 00:00:00.000000',
+            'published_at' => null,
+            'retry_count' => 0,
+            'last_error' => null,
+            'next_retry_at' => null,
+            'sequence_number' => 1,
+            // dead_letter_at intentionally omitted
+        ]);
+
+        self::assertFalse($entry->isDeadLetter());
+        self::assertNull($entry->getDeadLetterAt());
+    }
 }

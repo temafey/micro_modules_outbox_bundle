@@ -66,6 +66,7 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
         $sql = sprintf(
             'SELECT * FROM %s
              WHERE published_at IS NULL
+               AND dead_letter_at IS NULL
                AND (next_retry_at IS NULL OR next_retry_at <= :now)
              ORDER BY sequence_number ASC
              LIMIT :limit',
@@ -86,6 +87,7 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
         $sql = sprintf(
             'SELECT * FROM %s
              WHERE published_at IS NULL
+               AND dead_letter_at IS NULL
                AND message_type = :type
                AND (next_retry_at IS NULL OR next_retry_at <= :now)
              ORDER BY sequence_number ASC
@@ -206,7 +208,7 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
         $result = $this->connection->executeQuery(
             sprintf(
                 'SELECT COUNT(*) FROM %s
-                 WHERE published_at IS NULL AND retry_count > :max_retries',
+                 WHERE published_at IS NULL AND retry_count >= :max_retries',
                 self::TABLE_NAME
             ),
             [
@@ -224,7 +226,7 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
                 'DELETE FROM %s
                  WHERE id IN (
                      SELECT id FROM %s
-                     WHERE published_at IS NULL AND retry_count > :max_retries
+                     WHERE published_at IS NULL AND retry_count >= :max_retries
                      ORDER BY created_at ASC
                      LIMIT :limit
                  )',
@@ -233,6 +235,120 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
             ),
             [
                 'max_retries' => $maxRetries,
+                'limit' => $limit,
+            ]
+        );
+    }
+
+    public function markAsDeadLetter(string $id, \DateTimeImmutable $deadLetterAt): void
+    {
+        try {
+            $affectedRows = $this->connection->executeStatement(
+                sprintf(
+                    'UPDATE %s
+                     SET dead_letter_at = :dead_letter_at
+                     WHERE id = :id AND published_at IS NULL',
+                    self::TABLE_NAME
+                ),
+                [
+                    'id' => $id,
+                    'dead_letter_at' => $deadLetterAt->format('Y-m-d H:i:s.u'),
+                ]
+            );
+
+            if ($affectedRows === 0) {
+                throw OutboxPersistenceException::notFound($id);
+            }
+        } catch (DBALException $dbalException) {
+            throw OutboxPersistenceException::updateFailed($id, $dbalException);
+        }
+    }
+
+    public function findDeadLetter(int $limit): array
+    {
+        $sql = sprintf(
+            'SELECT * FROM %s
+             WHERE dead_letter_at IS NOT NULL
+             ORDER BY dead_letter_at ASC
+             LIMIT :limit',
+            self::TABLE_NAME
+        );
+
+        $result = $this->connection->executeQuery($sql, [
+            'limit' => $limit,
+        ]);
+
+        return array_map(OutboxEntry::fromArray(...), $result->fetchAllAssociative());
+    }
+
+    public function countDeadLetter(): int
+    {
+        $result = $this->connection->executeQuery(
+            sprintf(
+                'SELECT COUNT(*) FROM %s WHERE dead_letter_at IS NOT NULL',
+                self::TABLE_NAME
+            )
+        );
+
+        return (int) $result->fetchOne();
+    }
+
+    public function replayDeadLetter(string $id): bool
+    {
+        try {
+            $affectedRows = $this->connection->executeStatement(
+                sprintf(
+                    'UPDATE %s
+                     SET dead_letter_at = NULL,
+                         retry_count = 0,
+                         last_error = NULL,
+                         next_retry_at = NULL
+                     WHERE id = :id AND dead_letter_at IS NOT NULL AND published_at IS NULL',
+                    self::TABLE_NAME
+                ),
+                [
+                    'id' => $id,
+                ]
+            );
+
+            return $affectedRows > 0;
+        } catch (DBALException $dbalException) {
+            throw OutboxPersistenceException::updateFailed($id, $dbalException);
+        }
+    }
+
+    public function countDeadLetterBefore(\DateTimeImmutable $before): int
+    {
+        $result = $this->connection->executeQuery(
+            sprintf(
+                'SELECT COUNT(*) FROM %s
+                 WHERE dead_letter_at IS NOT NULL AND dead_letter_at < :before',
+                self::TABLE_NAME
+            ),
+            [
+                'before' => $before->format('Y-m-d H:i:s.u'),
+            ]
+        );
+
+        return (int) $result->fetchOne();
+    }
+
+    public function deleteDeadLetterBefore(\DateTimeImmutable $before, int $limit): int
+    {
+        return $this->connection->executeStatement(
+            sprintf(
+                'DELETE FROM %s
+                 WHERE id IN (
+                     SELECT id FROM %s
+                     WHERE dead_letter_at IS NOT NULL AND dead_letter_at < :before
+                     ORDER BY dead_letter_at ASC
+                     LIMIT :limit
+                 )',
+                self::TABLE_NAME,
+                self::TABLE_NAME
+            ),
+            [
+                'before' => $before->format('Y-m-d H:i:s.u'),
                 'limit' => $limit,
             ]
         );
@@ -260,11 +376,12 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
     {
         $sql = sprintf(
             'SELECT
-                COUNT(*) FILTER (WHERE published_at IS NULL) as total_pending,
-                COUNT(*) FILTER (WHERE published_at IS NULL AND message_type = \'EVENT\') as total_events,
-                COUNT(*) FILTER (WHERE published_at IS NULL AND message_type = \'TASK\') as total_tasks,
-                COUNT(*) FILTER (WHERE retry_count > 0 AND published_at IS NULL) as failed_count,
-                EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE published_at IS NULL)))::integer as oldest_pending_seconds
+                COUNT(*) FILTER (WHERE published_at IS NULL AND dead_letter_at IS NULL) as total_pending,
+                COUNT(*) FILTER (WHERE published_at IS NULL AND dead_letter_at IS NULL AND message_type = \'EVENT\') as total_events,
+                COUNT(*) FILTER (WHERE published_at IS NULL AND dead_letter_at IS NULL AND message_type = \'TASK\') as total_tasks,
+                COUNT(*) FILTER (WHERE retry_count > 0 AND published_at IS NULL AND dead_letter_at IS NULL) as failed_count,
+                COUNT(*) FILTER (WHERE dead_letter_at IS NOT NULL) as dlq_count,
+                EXTRACT(EPOCH FROM (NOW() - MIN(created_at) FILTER (WHERE published_at IS NULL AND dead_letter_at IS NULL)))::integer as oldest_pending_seconds
              FROM %s',
             self::TABLE_NAME
         );
@@ -277,6 +394,7 @@ final readonly class DbalOutboxRepository implements OutboxRepositoryInterface
             'total_events' => (int) ($result['total_events'] ?? 0),
             'total_tasks' => (int) ($result['total_tasks'] ?? 0),
             'failed_count' => (int) ($result['failed_count'] ?? 0),
+            'dlq_count' => (int) ($result['dlq_count'] ?? 0),
             'oldest_pending_seconds' => $result['oldest_pending_seconds'] !== null
                 ? (int) $result['oldest_pending_seconds']
                 : null,

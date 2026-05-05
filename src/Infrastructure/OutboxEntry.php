@@ -37,6 +37,7 @@ final readonly class OutboxEntry implements OutboxEntryInterface
         private ?string $lastError,
         private ?\DateTimeImmutable $nextRetryAt,
         private int $sequenceNumber,
+        private ?\DateTimeImmutable $deadLetterAt = null,
     ) {
     }
 
@@ -120,6 +121,7 @@ final readonly class OutboxEntry implements OutboxEntryInterface
             lastError: $data['last_error'] ?? null,
             nextRetryAt: isset($data['next_retry_at']) ? new \DateTimeImmutable($data['next_retry_at']) : null,
             sequenceNumber: (int) $data['sequence_number'],
+            deadLetterAt: isset($data['dead_letter_at']) ? new \DateTimeImmutable($data['dead_letter_at']) : null,
         );
     }
 
@@ -193,14 +195,28 @@ final readonly class OutboxEntry implements OutboxEntryInterface
         return $this->sequenceNumber;
     }
 
+    public function getDeadLetterAt(): ?\DateTimeImmutable
+    {
+        return $this->deadLetterAt;
+    }
+
     public function isPublished(): bool
     {
         return $this->publishedAt instanceof \DateTimeImmutable;
     }
 
+    public function isDeadLetter(): bool
+    {
+        return $this->deadLetterAt instanceof \DateTimeImmutable;
+    }
+
     public function isEligibleForRetry(): bool
     {
         if ($this->isPublished()) {
+            return false;
+        }
+
+        if ($this->isDeadLetter()) {
             return false;
         }
 
@@ -232,6 +248,7 @@ final readonly class OutboxEntry implements OutboxEntryInterface
             lastError: null,
             nextRetryAt: null,
             sequenceNumber: $this->sequenceNumber,
+            deadLetterAt: $this->deadLetterAt,
         );
     }
 
@@ -252,6 +269,49 @@ final readonly class OutboxEntry implements OutboxEntryInterface
             lastError: $error,
             nextRetryAt: $nextRetryAt,
             sequenceNumber: $this->sequenceNumber,
+            deadLetterAt: $this->deadLetterAt,
+        );
+    }
+
+    public function markAsDeadLetter(\DateTimeImmutable $deadLetterAt): OutboxEntryInterface
+    {
+        return new self(
+            id: $this->id,
+            messageType: $this->messageType,
+            aggregateType: $this->aggregateType,
+            aggregateId: $this->aggregateId,
+            eventType: $this->eventType,
+            eventPayload: $this->eventPayload,
+            topic: $this->topic,
+            routingKey: $this->routingKey,
+            createdAt: $this->createdAt,
+            publishedAt: null,
+            retryCount: $this->retryCount,
+            lastError: $this->lastError,
+            nextRetryAt: $this->nextRetryAt,
+            sequenceNumber: $this->sequenceNumber,
+            deadLetterAt: $deadLetterAt,
+        );
+    }
+
+    public function replayFromDeadLetter(): OutboxEntryInterface
+    {
+        return new self(
+            id: $this->id,
+            messageType: $this->messageType,
+            aggregateType: $this->aggregateType,
+            aggregateId: $this->aggregateId,
+            eventType: $this->eventType,
+            eventPayload: $this->eventPayload,
+            topic: $this->topic,
+            routingKey: $this->routingKey,
+            createdAt: $this->createdAt,
+            publishedAt: null,
+            retryCount: 0,
+            lastError: null,
+            nextRetryAt: null,
+            sequenceNumber: $this->sequenceNumber,
+            deadLetterAt: null,
         );
     }
 
@@ -272,6 +332,7 @@ final readonly class OutboxEntry implements OutboxEntryInterface
             'last_error' => $this->lastError,
             'next_retry_at' => $this->nextRetryAt?->format('Y-m-d H:i:s.u'),
             'sequence_number' => $this->sequenceNumber,
+            'dead_letter_at' => $this->deadLetterAt?->format('Y-m-d H:i:s.u'),
         ];
     }
 
